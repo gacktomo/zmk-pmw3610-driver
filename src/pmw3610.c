@@ -459,6 +459,7 @@ static int pmw3610_async_init_check_ob1(const struct device *dev) {
         return -EINVAL;
     }
 
+    LOG_INF("Skip checking product id");
     // err = check_product_id(dev);
     // if (err) {
     //     LOG_ERR("Failed checking product id");
