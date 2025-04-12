@@ -50,6 +50,9 @@ struct pixart_data {
 
     // for pmw3610 smart algorithm
     bool sw_smart_flag;
+    
+    // debug timer for polling sensor without interrupts
+    struct k_timer debug_timer;
 };
 
 // ball action config data structure

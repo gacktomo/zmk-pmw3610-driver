@@ -319,13 +319,12 @@ static int set_cpi(const struct device *dev, uint32_t cpi) {
     uint8_t data[] = {0xFF, value, 0x00};
     int err = burst_write(dev, addr, data, 3);
     if (err) {
-        LOG_ERR("Failed to set CPI: %d", err);
+        LOG_ERR("Failed to set CPI");
         return err;
     }
 
     struct pixart_data *dev_data = dev->data;
     dev_data->curr_cpi = cpi;
-    LOG_DBG("CPI set successfully to %u", cpi);
 
     return 0;
 }
@@ -460,7 +459,6 @@ static int pmw3610_async_init_check_ob1(const struct device *dev) {
         return -EINVAL;
     }
 
-    LOG_INF("Skip checking product id");
     // err = check_product_id(dev);
     // if (err) {
     //     LOG_ERR("Failed checking product id");
@@ -547,7 +545,11 @@ static void pmw3610_async_init(struct k_work *work) {
         if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
             data->ready = true; // sensor is ready to work
             LOG_INF("PMW3610 initialized");
-            set_interrupt(dev, true);
+            
+            // 割り込みの代わりにタイマーを開始（デバッグ用）
+            // set_interrupt(dev, true);  // 割り込みを無効化
+            k_timer_start(&data->debug_timer, K_MSEC(1000), K_MSEC(1000));  // 100ミリ秒ごとにタイマー起動
+            LOG_INF("Debug timer started for polling sensor data every 100 milliseconds");
         } else {
             k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
         }
@@ -615,14 +617,10 @@ static int pmw3610_report_data(const struct device *dev) {
     case MOVE:
         set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
         dividor = CONFIG_PMW3610_CPI_DIVIDOR;
-        if (input_mode_changed) {
-            LOG_DBG("Mode changed to MOVE. CPI: %d, Dividor: %d", CONFIG_PMW3610_CPI, dividor);
-        }
         break;
     case SCROLL:
         set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
         if (input_mode_changed) {
-            LOG_DBG("Mode changed to SCROLL. CPI: %d", CONFIG_PMW3610_CPI);
             data->scroll_delta_x = 0;
             data->scroll_delta_y = 0;
         }
@@ -631,14 +629,10 @@ static int pmw3610_report_data(const struct device *dev) {
     case SNIPE:
         set_cpi_if_needed(dev, CONFIG_PMW3610_SNIPE_CPI);
         dividor = CONFIG_PMW3610_SNIPE_CPI_DIVIDOR;
-        if (input_mode_changed) {
-            LOG_DBG("Mode changed to SNIPE. CPI: %d, Dividor: %d", CONFIG_PMW3610_SNIPE_CPI, dividor);
-        }
         break;
     case BALL_ACTION:
         set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
         if (input_mode_changed) {
-            LOG_DBG("Mode changed to BALL_ACTION. CPI: %d", CONFIG_PMW3610_CPI);
             data->ball_action_delta_x = 0;
             data->ball_action_delta_y = 0;
         }
@@ -664,16 +658,19 @@ static int pmw3610_report_data(const struct device *dev) {
 
     int err = motion_burst_read(dev, buf, sizeof(buf));
     if (err) {
-        LOG_ERR("Motion burst read failed: %d", err);
+        LOG_ERR("Motion burst read failed with error: %d", err);
         return err;
     }
+
+    LOG_INF("Motion data: [0]=%02x [1]=%02x [2]=%02x [3]=%02x [4]=%02x [5]=%02x",
+           buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
 
     int16_t raw_x =
         TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12) / dividor;
     int16_t raw_y =
         TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12) / dividor;
 
-    LOG_DBG("Raw sensor data - X: %d, Y: %d (dividor: %d)", raw_x, raw_y, dividor);
+    LOG_INF("Raw motion: x=%d, y=%d", raw_x, raw_y);
 
     if (IS_ENABLED(CONFIG_PMW3610_ORIENTATION_0)) {
         x = -raw_x;
@@ -697,21 +694,20 @@ static int pmw3610_report_data(const struct device *dev) {
         y = -y;
     }
 
-    LOG_DBG("Processed motion - X: %d, Y: %d (mode: %d)", x, y, input_mode);
+    LOG_INF("Processed motion: x=%d, y=%d", x, y);
 
 #ifdef CONFIG_PMW3610_SMART_ALGORITHM
     int16_t shutter =
         ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8) + buf[PMW3610_SHUTTER_L_POS];
-    LOG_DBG("Shutter value: %d, smart_flag: %d", shutter, data->sw_smart_flag);
     if (data->sw_smart_flag && shutter < 45) {
         reg_write(dev, 0x32, 0x00);
-        LOG_DBG("Disabling smart algorithm (shutter < 45)");
+
         data->sw_smart_flag = false;
     }
 
     if (!data->sw_smart_flag && shutter > 45) {
         reg_write(dev, 0x32, 0x80);
-        LOG_DBG("Enabling smart algorithm (shutter > 45)");
+
         data->sw_smart_flag = true;
     }
 #endif
@@ -719,7 +715,6 @@ static int pmw3610_report_data(const struct device *dev) {
 #ifdef CONFIG_PMW3610_POLLING_RATE_125_SW
     int64_t curr_time = k_uptime_get();
     if (data->last_poll_time == 0 || curr_time - data->last_poll_time > 128) {
-        LOG_DBG("Polling rate control - Storing values (X: %d, Y: %d) for later", x, y);
         data->last_poll_time = curr_time;
         data->last_x = x;
         data->last_y = y;
@@ -727,7 +722,6 @@ static int pmw3610_report_data(const struct device *dev) {
     } else {
         x += data->last_x;
         y += data->last_y;
-        LOG_DBG("Polling rate control - Combined values (X: %d, Y: %d)", x, y);
         data->last_poll_time = 0;
         data->last_x = 0;
         data->last_y = 0;
@@ -739,34 +733,24 @@ static int pmw3610_report_data(const struct device *dev) {
 #if AUTOMOUSE_LAYER > 0
             // トラックボールの動きの大きさを計算
             int16_t movement_size = abs(x) + abs(y);
-            LOG_DBG("Movement size: %d, threshold: %d", movement_size, CONFIG_PMW3610_MOVEMENT_THRESHOLD);
             if (input_mode == MOVE &&
                 (automouse_triggered || zmk_keymap_highest_layer_active() != AUTOMOUSE_LAYER) &&
                 movement_size > CONFIG_PMW3610_MOVEMENT_THRESHOLD) {
-                LOG_DBG("Activating automouse layer due to movement threshold");
                 activate_automouse_layer();
             }
 #endif
-            LOG_DBG("Reporting %s movement - X: %d, Y: %d", 
-                   input_mode == MOVE ? "normal" : "snipe", x, y);
             input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
         } else if (input_mode == SCROLL) {
             data->scroll_delta_x += x;
             data->scroll_delta_y += y;
-            LOG_DBG("Scroll accumulation - X: %d (total: %d), Y: %d (total: %d), tick: %d", 
-                   x, data->scroll_delta_x, y, data->scroll_delta_y, CONFIG_PMW3610_SCROLL_TICK);
             if (abs(data->scroll_delta_y) > CONFIG_PMW3610_SCROLL_TICK) {
-                LOG_DBG("Reporting vertical scroll: %d", 
-                       data->scroll_delta_y > 0 ? PMW3610_SCROLL_Y_NEGATIVE : PMW3610_SCROLL_Y_POSITIVE);
                 input_report_rel(dev, INPUT_REL_WHEEL,
                                  data->scroll_delta_y > 0 ? PMW3610_SCROLL_Y_NEGATIVE : PMW3610_SCROLL_Y_POSITIVE,
                                  true, K_FOREVER);
                 data->scroll_delta_x = 0;
                 data->scroll_delta_y = 0;
             } else if (abs(data->scroll_delta_x) > CONFIG_PMW3610_SCROLL_TICK) {
-                LOG_DBG("Reporting horizontal scroll: %d", 
-                       data->scroll_delta_x > 0 ? PMW3610_SCROLL_X_NEGATIVE : PMW3610_SCROLL_X_POSITIVE);
                 input_report_rel(dev, INPUT_REL_HWHEEL,
                                  data->scroll_delta_x > 0 ? PMW3610_SCROLL_X_NEGATIVE : PMW3610_SCROLL_X_POSITIVE,
                                  true, K_FOREVER);
@@ -776,17 +760,13 @@ static int pmw3610_report_data(const struct device *dev) {
         } else if (input_mode == BALL_ACTION) {
             data->ball_action_delta_x += x;
             data->ball_action_delta_y += y;
-            LOG_DBG("Ball action accumulation - X: %d (total: %d), Y: %d (total: %d)", 
-                   x, data->ball_action_delta_x, y, data->ball_action_delta_y);
 
             const struct pixart_config *config = dev->config;
 
             if(ball_action_idx != -1) {
                 const struct ball_action_cfg action_cfg = *config->ball_actions[ball_action_idx];
 
-                LOG_DBG("Ball action state [%d] - Layer: %d, Tick: %d, accum X: %d, accum Y: %d", 
-                       ball_action_idx, zmk_keymap_highest_layer_active(), 
-                       action_cfg.tick, data->ball_action_delta_x, data->ball_action_delta_y);
+                LOG_DBG("invoking ball action [%d], layer=%d", ball_action_idx, zmk_keymap_highest_layer_active());
 
                 struct zmk_behavior_binding_event event = {
                     .position = INT32_MAX,
@@ -801,17 +781,11 @@ static int pmw3610_report_data(const struct device *dev) {
                 int idx = -1;
                 if(abs(data->ball_action_delta_x) > action_cfg.tick) {
                     idx = data->ball_action_delta_x > 0 ? 0 : 1;
-                    LOG_DBG("Ball action X direction trigger: %d (index: %d)", 
-                           data->ball_action_delta_x, idx);
                 } else if(abs(data->ball_action_delta_y) > action_cfg.tick) {
                     idx = data->ball_action_delta_y > 0 ? 3 : 2;
-                    LOG_DBG("Ball action Y direction trigger: %d (index: %d)", 
-                           data->ball_action_delta_y, idx);
                 }
 
                 if(idx != -1) {
-                    LOG_DBG("Triggering ball action binding at index %d (tap_ms: %d, wait_ms: %d)", 
-                           idx, action_cfg.tap_ms, action_cfg.wait_ms);
                     zmk_behavior_queue_add(&event, action_cfg.bindings[idx], true, action_cfg.tap_ms);
                     zmk_behavior_queue_add(&event, action_cfg.bindings[idx], false, action_cfg.wait_ms);
 
@@ -830,7 +804,6 @@ static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callba
     struct pixart_data *data = CONTAINER_OF(cb, struct pixart_data, irq_gpio_cb);
     const struct device *dev = data->dev;
 
-    LOG_DBG("GPIO interrupt triggered");
     set_interrupt(dev, false);
 
     // submit the real handler work
@@ -842,7 +815,6 @@ static void pmw3610_work_callback(struct k_work *work) {
     const struct device *dev = data->dev;
 
     pmw3610_report_data(dev);
-    set_interrupt(dev, true);
 }
 
 static int pmw3610_init_irq(const struct device *dev) {
@@ -876,6 +848,13 @@ static int pmw3610_init_irq(const struct device *dev) {
     LOG_INF("Configure irq done");
 
     return err;
+}
+
+// デバッグ用の定期的なデータ読み取り関数
+static void pmw3610_timer_handler(struct k_timer *timer) {
+    struct pixart_data *data = CONTAINER_OF(timer, struct pixart_data, debug_timer);
+    k_work_submit(&data->trigger_work);
+    LOG_DBG("Timer triggered sensor read");
 }
 
 static int pmw3610_init(const struct device *dev) {
@@ -918,6 +897,9 @@ static int pmw3610_init(const struct device *dev) {
     // 3. other configs like cpi, downshift time, sample time etc.
     // The sensor is ready to work (i.e., data->ready=true after the above steps are finished)
     k_work_init_delayable(&data->init_work, pmw3610_async_init);
+
+    // デバッグ用タイマー初期化
+    k_timer_init(&data->debug_timer, pmw3610_timer_handler, NULL);
 
     k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
 
