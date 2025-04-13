@@ -884,6 +884,9 @@ static int pmw3610_init_irq(const struct device *dev) {
     struct pixart_data *data = dev->data;
     const struct pixart_config *config = dev->config;
 
+    LOG_INF("IRQ GPIO Pin details - Port: %s, Pin: %d", 
+            config->irq_gpio.port->name, config->irq_gpio.pin);
+
     // check readiness of irq gpio pin
     if (!device_is_ready(config->irq_gpio.port)) {
         LOG_ERR("IRQ GPIO device not ready");
