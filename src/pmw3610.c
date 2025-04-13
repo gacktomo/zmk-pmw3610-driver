@@ -61,6 +61,7 @@ static int pmw3610_async_init_power_up(const struct device *dev);
 static int pmw3610_async_init_clear_ob1(const struct device *dev);
 static int pmw3610_async_init_check_ob1(const struct device *dev);
 static int pmw3610_async_init_configure(const struct device *dev);
+static void print_sensor_info(const struct device *dev);
 
 static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *dev) = {
     [ASYNC_INIT_STEP_POWER_UP] = pmw3610_async_init_power_up,
@@ -525,7 +526,39 @@ static int pmw3610_async_init_configure(const struct device *dev) {
         return err;
     }
 
+    // センサー情報のデバッグ出力
+    print_sensor_info(dev);
+
     return 0;
+}
+
+// センサーの基本情報をログに出力する
+static void print_sensor_info(const struct device *dev) {
+    uint8_t pid, rid, motion, obs;
+    
+    if (reg_read(dev, PMW3610_REG_PRODUCT_ID, &pid) == 0) {
+        LOG_INF("Product ID: 0x%02x (Expected: 0x%02x)", pid, PMW3610_PRODUCT_ID);
+    } else {
+        LOG_ERR("Failed to read Product ID");
+    }
+    
+    if (reg_read(dev, PMW3610_REG_REVISION_ID, &rid) == 0) {
+        LOG_INF("Revision ID: 0x%02x", rid);
+    } else {
+        LOG_ERR("Failed to read Revision ID");
+    }
+    
+    if (reg_read(dev, PMW3610_REG_MOTION, &motion) == 0) {
+        LOG_INF("Motion register: 0x%02x", motion);
+    } else {
+        LOG_ERR("Failed to read Motion register");
+    }
+    
+    if (reg_read(dev, PMW3610_REG_OBSERVATION, &obs) == 0) {
+        LOG_INF("Observation register: 0x%02x", obs);
+    } else {
+        LOG_ERR("Failed to read Observation register");
+    }
 }
 
 // checked and keep
@@ -546,10 +579,10 @@ static void pmw3610_async_init(struct k_work *work) {
             data->ready = true; // sensor is ready to work
             LOG_INF("PMW3610 initialized");
             
-            // 割り込みの代わりにタイマーを開始（デバッグ用）
+            // 割り込みを無効にし、タイマーのみでポーリング
             // set_interrupt(dev, true);  // 割り込みを無効化
-            k_timer_start(&data->debug_timer, K_MSEC(1000), K_MSEC(1000));  // 100ミリ秒ごとにタイマー起動
-            LOG_INF("Debug timer started for polling sensor data every 100 milliseconds");
+            k_timer_start(&data->debug_timer, K_MSEC(10), K_MSEC(10));  // 10ミリ秒ごとにタイマー起動（100Hz）
+            LOG_INF("Timer-only mode: polling sensor every 10ms (100Hz)");
         } else {
             k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
         }
@@ -610,6 +643,22 @@ static int pmw3610_report_data(const struct device *dev) {
         return -EBUSY;
     }
 
+    // まずモーションレジスタを直接読み取り
+    uint8_t motion_status = 0;
+    int err = reg_read(dev, PMW3610_REG_MOTION, &motion_status);
+    if (err) {
+        LOG_ERR("Failed to read motion register: %d", err);
+        return err;
+    }
+    
+    // モーション情報をわかりやすくログ出力
+    static uint16_t log_counter = 0;
+    if (++log_counter >= 50) {  // 50回に1回だけログ出力（頻度を下げる）
+        log_counter = 0;
+        LOG_INF("Motion status: 0x%02x (Motion=%d)", 
+                motion_status, (motion_status & 0x01) ? 1 : 0);
+    }
+
     int32_t dividor;
     enum pixart_input_mode input_mode = get_input_mode_for_current_layer(dev);
     bool input_mode_changed = data->curr_mode != input_mode;
@@ -656,21 +705,27 @@ static int pmw3610_report_data(const struct device *dev) {
     }
 #endif
 
-    int err = motion_burst_read(dev, buf, sizeof(buf));
+    // バーストモードでデータを読み取り
+    err = motion_burst_read(dev, buf, sizeof(buf));
     if (err) {
         LOG_ERR("Motion burst read failed with error: %d", err);
         return err;
     }
 
-    LOG_INF("Motion data: [0]=%02x [1]=%02x [2]=%02x [3]=%02x [4]=%02x [5]=%02x",
-           buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+    // バーストデータの最初のバイトはモーションステータス
+    if (log_counter == 0) {
+        LOG_INF("Burst data: [0]=0x%02x [1]=0x%02x [2]=0x%02x [3]=0x%02x [4]=0x%02x [5]=0x%02x",
+               buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+    }
 
     int16_t raw_x =
         TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12) / dividor;
     int16_t raw_y =
         TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12) / dividor;
 
-    LOG_INF("Raw motion: x=%d, y=%d", raw_x, raw_y);
+    if (log_counter == 0) {
+        LOG_INF("Raw motion: x=%d, y=%d", raw_x, raw_y);
+    }
 
     if (IS_ENABLED(CONFIG_PMW3610_ORIENTATION_0)) {
         x = -raw_x;
@@ -694,7 +749,10 @@ static int pmw3610_report_data(const struct device *dev) {
         y = -y;
     }
 
-    LOG_INF("Processed motion: x=%d, y=%d", x, y);
+    // 動きが一定以上ある場合のみログ表示して処理時間を節約
+    if (abs(x) + abs(y) > 5 || log_counter == 0) {
+        LOG_INF("Motion: x=%d, y=%d (mode=%d)", x, y, input_mode);
+    }
 
 #ifdef CONFIG_PMW3610_SMART_ALGORITHM
     int16_t shutter =
@@ -799,21 +857,23 @@ static int pmw3610_report_data(const struct device *dev) {
     return err;
 }
 
+// デバッグ用の定期的なデータ読み取り関数
+static void pmw3610_timer_handler(struct k_timer *timer) {
+    struct pixart_data *data = CONTAINER_OF(timer, struct pixart_data, debug_timer);
+    k_work_submit(&data->trigger_work);
+}
+
 static void pmw3610_gpio_callback(const struct device *gpiob, struct gpio_callback *cb,
                                   uint32_t pins) {
-    struct pixart_data *data = CONTAINER_OF(cb, struct pixart_data, irq_gpio_cb);
-    const struct device *dev = data->dev;
-
-    set_interrupt(dev, false);
-
-    // submit the real handler work
-    k_work_submit(&data->trigger_work);
+    // 割り込みモードでは使用しないので何もしない
+    LOG_DBG("IRQ callback triggered - but IRQ mode is disabled");
 }
 
 static void pmw3610_work_callback(struct k_work *work) {
     struct pixart_data *data = CONTAINER_OF(work, struct pixart_data, trigger_work);
     const struct device *dev = data->dev;
 
+    // センサからデータを読み取って処理
     pmw3610_report_data(dev);
 }
 
@@ -848,13 +908,6 @@ static int pmw3610_init_irq(const struct device *dev) {
     LOG_INF("Configure irq done");
 
     return err;
-}
-
-// デバッグ用の定期的なデータ読み取り関数
-static void pmw3610_timer_handler(struct k_timer *timer) {
-    struct pixart_data *data = CONTAINER_OF(timer, struct pixart_data, debug_timer);
-    k_work_submit(&data->trigger_work);
-    LOG_DBG("Timer triggered sensor read");
 }
 
 static int pmw3610_init(const struct device *dev) {
