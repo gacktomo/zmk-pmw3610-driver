@@ -84,6 +84,8 @@ static int spi_cs_ctrl(const struct device *dev, bool enable) {
     err = gpio_pin_set_dt(&config->cs_gpio, (int)enable);
     if (err) {
         LOG_ERR("SPI CS ctrl failed");
+    } else {
+        LOG_DBG("SPI CS pin set to %d (0=Active/Low, 1=Inactive/High)", (int)enable);
     }
 
     if (enable) {
@@ -207,8 +209,14 @@ static int motion_burst_read(const struct device *dev, uint8_t *buf, size_t burs
     int err;
     /* struct pixart_data *data = dev->data; */
     const struct pixart_config *config = dev->config;
+    int cs_state = -1;
 
     __ASSERT_NO_MSG(burst_size <= PMW3610_MAX_BURST_SIZE);
+
+    // バーストリード前のCSピン状態確認
+    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
+        LOG_DBG("Before burst read - CS/NCS Pin state: %d", cs_state);
+    }
 
     err = spi_cs_ctrl(dev, true);
     if (err) {
@@ -243,6 +251,11 @@ static int motion_burst_read(const struct device *dev, uint8_t *buf, size_t burs
     err = spi_cs_ctrl(dev, false);
     if (err) {
         return err;
+    }
+
+    // バーストリード後のCSピン状態確認
+    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
+        LOG_DBG("After burst read - CS/NCS Pin state: %d", cs_state);
     }
 
     /* Terminate burst */
@@ -535,6 +548,15 @@ static int pmw3610_async_init_configure(const struct device *dev) {
 // センサーの基本情報をログに出力する
 static void print_sensor_info(const struct device *dev) {
     uint8_t pid, rid, motion, obs;
+    const struct pixart_config *config = dev->config;
+    int cs_state = -1;
+    
+    // CSピンの現在の状態を読み取り
+    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
+        LOG_INF("CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
+    } else {
+        LOG_ERR("Failed to read CS/NCS pin state");
+    }
     
     if (reg_read(dev, PMW3610_REG_PRODUCT_ID, &pid) == 0) {
         LOG_INF("Product ID: 0x%02x (Expected: 0x%02x)", pid, PMW3610_PRODUCT_ID);
@@ -637,10 +659,17 @@ static enum pixart_input_mode get_input_mode_for_current_layer(const struct devi
 static int pmw3610_report_data(const struct device *dev) {
     struct pixart_data *data = dev->data;
     uint8_t buf[PMW3610_BURST_SIZE];
+    const struct pixart_config *config = dev->config;
 
     if (unlikely(!data->ready)) {
         LOG_WRN("Device is not initialized yet");
         return -EBUSY;
+    }
+
+    // モーションレジスタを読み取る前にCSピンの状態を確認
+    int cs_state = -1;
+    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
+        LOG_DBG("Before motion read - CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
     }
 
     // まずモーションレジスタを直接読み取り
@@ -755,6 +784,12 @@ static int pmw3610_report_data(const struct device *dev) {
         const struct pixart_config *config = dev->config;
         LOG_INF("IRQ GPIO Pin details - Port: %s, Pin: %d", 
             config->irq_gpio.port->name, config->irq_gpio.pin);
+        
+        // CSピンの現在の状態も読み取って表示
+        int cs_state = -1;
+        if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
+            LOG_INF("CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
+        }
     }
 
 #ifdef CONFIG_PMW3610_SMART_ALGORITHM
@@ -886,9 +921,6 @@ static int pmw3610_init_irq(const struct device *dev) {
     int err;
     struct pixart_data *data = dev->data;
     const struct pixart_config *config = dev->config;
-
-    LOG_INF("IRQ GPIO Pin details - Port: %s, Pin: %d", 
-            config->irq_gpio.port->name, config->irq_gpio.pin);
 
     // check readiness of irq gpio pin
     if (!device_is_ready(config->irq_gpio.port)) {
