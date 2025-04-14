@@ -597,8 +597,8 @@ static void pmw3610_async_init(struct k_work *work) {
             LOG_INF("PMW3610 initialized");
             
             // 割り込みを無効にし、タイマーのみでポーリング
-            set_interrupt(dev, true);  // 割り込みを無効化
-            // k_timer_start(&data->debug_timer, K_MSEC(10), K_MSEC(10));  // 10ミリ秒ごとにタイマー起動（100Hz）
+            // set_interrupt(dev, true);  // 割り込みを無効化
+            k_timer_start(&data->debug_timer, K_MSEC(10), K_MSEC(10));  // 10ミリ秒ごとにタイマー起動（100Hz）
             LOG_INF("Timer-only mode: polling sensor every 10ms (100Hz)");
         } else {
             k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
