@@ -752,6 +752,7 @@ static int pmw3610_report_data(const struct device *dev) {
     // 動きが一定以上ある場合のみログ表示して処理時間を節約
     if (abs(x) + abs(y) > 5 || log_counter == 0) {
         LOG_INF("Motion: x=%d, y=%d (mode=%d)", x, y, input_mode);
+        const struct pixart_config *config = dev->config;
         LOG_INF("IRQ GPIO Pin details - Port: %s, Pin: %d", 
             config->irq_gpio.port->name, config->irq_gpio.pin);
     }
