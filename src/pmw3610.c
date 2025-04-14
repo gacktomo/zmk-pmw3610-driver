@@ -214,9 +214,8 @@ static int motion_burst_read(const struct device *dev, uint8_t *buf, size_t burs
     __ASSERT_NO_MSG(burst_size <= PMW3610_MAX_BURST_SIZE);
 
     // バーストリード前のCSピン状態確認
-    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
-        LOG_DBG("Before burst read - CS/NCS Pin state: %d", cs_state);
-    }
+    cs_state = gpio_pin_get_dt(&config->cs_gpio);
+    LOG_DBG("Before burst read - CS/NCS Pin state: %d", cs_state);
 
     err = spi_cs_ctrl(dev, true);
     if (err) {
@@ -254,9 +253,8 @@ static int motion_burst_read(const struct device *dev, uint8_t *buf, size_t burs
     }
 
     // バーストリード後のCSピン状態確認
-    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
-        LOG_DBG("After burst read - CS/NCS Pin state: %d", cs_state);
-    }
+    cs_state = gpio_pin_get_dt(&config->cs_gpio);
+    LOG_DBG("After burst read - CS/NCS Pin state: %d", cs_state);
 
     /* Terminate burst */
     k_busy_wait(T_BEXIT);
@@ -552,11 +550,8 @@ static void print_sensor_info(const struct device *dev) {
     int cs_state = -1;
     
     // CSピンの現在の状態を読み取り
-    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
-        LOG_INF("CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
-    } else {
-        LOG_ERR("Failed to read CS/NCS pin state");
-    }
+    cs_state = gpio_pin_get_dt(&config->cs_gpio);
+    LOG_INF("CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
     
     if (reg_read(dev, PMW3610_REG_PRODUCT_ID, &pid) == 0) {
         LOG_INF("Product ID: 0x%02x (Expected: 0x%02x)", pid, PMW3610_PRODUCT_ID);
@@ -602,8 +597,8 @@ static void pmw3610_async_init(struct k_work *work) {
             LOG_INF("PMW3610 initialized");
             
             // 割り込みを無効にし、タイマーのみでポーリング
-            // set_interrupt(dev, true);  // 割り込みを無効化
-            k_timer_start(&data->debug_timer, K_MSEC(10), K_MSEC(10));  // 10ミリ秒ごとにタイマー起動（100Hz）
+            set_interrupt(dev, true);  // 割り込みを無効化
+            // k_timer_start(&data->debug_timer, K_MSEC(10), K_MSEC(10));  // 10ミリ秒ごとにタイマー起動（100Hz）
             LOG_INF("Timer-only mode: polling sensor every 10ms (100Hz)");
         } else {
             k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
@@ -668,9 +663,8 @@ static int pmw3610_report_data(const struct device *dev) {
 
     // モーションレジスタを読み取る前にCSピンの状態を確認
     int cs_state = -1;
-    if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
-        LOG_DBG("Before motion read - CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
-    }
+    cs_state = gpio_pin_get_dt(&config->cs_gpio);
+    LOG_DBG("Before motion read - CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
 
     // まずモーションレジスタを直接読み取り
     uint8_t motion_status = 0;
@@ -781,15 +775,12 @@ static int pmw3610_report_data(const struct device *dev) {
     // 動きが一定以上ある場合のみログ表示して処理時間を節約
     if (abs(x) + abs(y) > 5 || log_counter == 0) {
         LOG_INF("Motion: x=%d, y=%d (mode=%d)", x, y, input_mode);
-        const struct pixart_config *config = dev->config;
         LOG_INF("IRQ GPIO Pin details - Port: %s, Pin: %d", 
             config->irq_gpio.port->name, config->irq_gpio.pin);
         
         // CSピンの現在の状態も読み取って表示
-        int cs_state = -1;
-        if (gpio_pin_get_dt(&config->cs_gpio, &cs_state) == 0) {
-            LOG_INF("CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
-        }
+        cs_state = gpio_pin_get_dt(&config->cs_gpio);
+        LOG_INF("CS/NCS Pin state: %d (0=Active/Low, 1=Inactive/High)", cs_state);
     }
 
 #ifdef CONFIG_PMW3610_SMART_ALGORITHM
